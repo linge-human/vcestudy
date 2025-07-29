@@ -1,16 +1,13 @@
-// ========== CONFIG ========
-const CHAT_PROXY_URL = 'YOUR_PROXY_ENDPOINT'; // e.g. Vercel/Cloudflare/Heroku function
-const NOTES_FOLDER = 'notes/'; // "notes/" directory in your repo
+const NOTES_FOLDER = 'notes/';
 
-// ========== Chat State ============
 let chats = [];
 let currentChatIdx = -1;
 let userSubjects = "Biology, Chemistry, Physics, Math Methods, Specialist Maths";
 let userFocus = "";
 let notesIndex = [];
-let loadedNotes = {}; // {filename: content}
+let loadedNotes = {};
+let openaiKey = '';
 
-// ========== UI Handling ==============
 const chatListEl = document.getElementById('chat-list');
 const chatFormEl = document.getElementById('chat-form');
 const chatInputEl = document.getElementById('chat-input');
@@ -21,14 +18,38 @@ const focusEl = document.getElementById('focus');
 const notesListEl = document.getElementById('notes-list');
 const notePreviewEl = document.getElementById('note-preview');
 
+// === API Key UI ===
+const apiKeyEl = document.getElementById('api-key');
+const saveKeyBtn = document.getElementById('save-key');
+const clearKeyBtn = document.getElementById('clear-key');
+saveKeyBtn.onclick = ()=>{
+  openaiKey = apiKeyEl.value.trim();
+  if(!openaiKey.startsWith('sk-')) {alert("That looks like an invalid OpenAI key (should start with sk-)"); return; }
+  sessionStorage.setItem('openai-key', openaiKey);
+  apiKeyEl.value = ''; apiKeyEl.placeholder = 'API key saved!';
+};
+clearKeyBtn.onclick = ()=>{
+  openaiKey = '';
+  sessionStorage.removeItem('openai-key');
+  apiKeyEl.value = '';
+  apiKeyEl.placeholder = 'Paste API key here';
+};
+// On load, check if there's a saved one
+window.addEventListener('DOMContentLoaded', ()=>{
+  if(sessionStorage.getItem('openai-key')) {
+    openaiKey = sessionStorage.getItem('openai-key');
+    apiKeyEl.placeholder = 'API key loaded';
+  }
+});
+
+// === Input Logic ===
 subjectsEl.addEventListener('input', e => { userSubjects = e.target.value; });
 focusEl.addEventListener('input', e => { userFocus = e.target.value; updateFocus(); });
-
 function updateFocus() {
   focusHeaderEl.textContent = userFocus ? `Focus: ${userFocus}` : '';
 }
 
-// ========== Multi-Chat ==============
+// === Multi-Chat Logic ===
 function saveChats() {
   localStorage.setItem('vce-chats', JSON.stringify(chats));
   localStorage.setItem('vce-active', currentChatIdx);
@@ -63,7 +84,8 @@ document.getElementById('chat-new').onclick=()=>{
 function chatTitleFromContent(msg) {
   return (msg || "").slice(0,40).replace(/[\r\n]+/g,' ').trim() || "Chat";
 }
-// ========== Chat Message Logic ===========
+
+// === Chat Msg logic ===
 chatFormEl.onsubmit = e => {
   e.preventDefault();
   sendMessage();
@@ -103,11 +125,8 @@ loadChats();
 renderChat();
 displayChatList();
 
-// ========== Notes Logic (fetch all .md/.txt in notes/) =============
+// === Notes Logic
 async function loadNotes() {
-  // Use GitHub raw CDN e.g. https://raw.githubusercontent.com/<user>/<repo>/main/notes/
-  // For static GH Pages, you must manually update notesList if not using API!
-  // Example: grab a manifest `notes/index.json` containing files list
   try {
     const manifest = await fetch(NOTES_FOLDER+'index.json').then(res=>res.json());
     notesIndex = manifest.files || [];
@@ -126,7 +145,7 @@ async function loadNotes() {
 notesListEl.onchange = ()=>{
   let f = notesListEl.value;
   if(f) loadNoteContent(f);
-}
+};
 async function loadNoteContent(f) {
   try {
     let txt = await fetch(NOTES_FOLDER+f).then(r=>r.text());
@@ -134,45 +153,58 @@ async function loadNoteContent(f) {
     loadedNotes[f] = txt;
   } catch { notePreviewEl.textContent = ''; }
 }
-// Call loadNotes (but user must create notes/index.json!)
-// [Example index.json: {"files":["bio1.md","chem2.txt"]}]
 loadNotes();
 
-// ========== AI Response via Proxy ============
+// === AI Response via OpenAI API ===
 async function getAIResponse(chat) {
+  // API key
+  if(!openaiKey) {
+    alert('Please paste your OpenAI API key in the sidebar first!');
+    return;
+  }
   // Show placeholder/loading
   chat.messages.push({role:"assistant", content:"Thinking..."});
   renderChat();
 
-  // Compose context: subjects, focus, last few messages, selected note
+  // Compose context
   let sysPrompt = `You are a private VCE study assistant, focused only on the user's VCE subjects: "${userSubjects}". The user's current focus is "${userFocus}". Use current official VCE textbook/guide references to inform your answers (e.g. Cambridge Chemistry 3/4 sec 9.3). If matching content is found in the provided notes, use it as evidence. Act like a warm human teacher. Answer directly, only as much as needed.`;
 
   const selectedNote = loadedNotes[notesListEl.value] || '';
   let context = [];
   if(selectedNote) context.push(`User note:\n${selectedNote.slice(0,2000)}`);
 
-  // Use last 12 chat messages as context
+  // Use last 12 messages
   let history = chat.messages.slice(-12).filter(m=>m.role&&m.content);
   let messages = [
     {role:"system", content: sysPrompt + (context.length?("\n\n" + context.join("\n\n")):'')}
   ].concat(history.filter(m=>m.content!=="Thinking..."));
 
-  // Call backend proxy 
+  // Call OpenAI API directly
   try {
-    const res = await fetch(CHAT_PROXY_URL,{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ messages })
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${openaiKey}`
+      },
+      body: JSON.stringify({
+        model: "gpt-4o", // or "gpt-4" if you want
+        messages,
+        temperature: 0.4,
+        max_tokens: 750,
+      }),
     });
-    const data = await res.json();
+
+    const data = await response.json();
     let reply = (data.choices && data.choices[0] && data.choices[0].message.content) || data.reply || "Error, couldn't get reply.";
     // Replace 'Thinking...'
     chat.messages.pop();
     chat.messages.push({role:"assistant", content:reply});
-    saveChats(); renderChat();
+    saveChats();
+    renderChat();
   } catch(e) {
     chat.messages.pop();
-    chat.messages.push({role:"assistant", content:"[Error contacting AI proxy]"});
+    chat.messages.push({role:"assistant", content:"[Error contacting OpenAI]"});
     saveChats();renderChat();
   }
 }
